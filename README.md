@@ -6,7 +6,11 @@ LineraChess is a fully decentralized chess game built on the [Linera](https://li
 
 ![LineraChess Logo](./public/logo.png)
 
+## Demo Link
+-https://linera-chess.vercel.app/
+
 ## ✨ Features
+
 
 - 🚀 **Lightning Fast** - Instant move verification with Linera's parallel execution
 - 🔗 **Fully Onchain** - Every move is stored on the blockchain
