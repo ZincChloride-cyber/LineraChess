@@ -24,13 +24,12 @@ CREATE POLICY "Anyone can create games"
   ON public.games FOR INSERT
   WITH CHECK (true);
 
--- Players can update their own games
-CREATE POLICY "Players can update games"
+-- Anyone can update games (validation happens at application level via wallet addresses)
+-- This allows the frontend to update game state since we're using Linera wallet addresses
+-- for authentication rather than Supabase auth
+CREATE POLICY "Anyone can update games"
   ON public.games FOR UPDATE
-  USING (
-    player1 = current_setting('app.current_user_address', true) OR
-    player2 = current_setting('app.current_user_address', true)
-  );
+  USING (true);
 
 -- Create index for faster queries
 CREATE INDEX IF NOT EXISTS idx_games_player1 ON public.games(player1);

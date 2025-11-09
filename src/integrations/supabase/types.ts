@@ -141,6 +141,45 @@ export type Database = {
           },
         ]
       }
+      games: {
+        Row: {
+          id: string
+          player1: string
+          player2: string | null
+          current_player: 'white' | 'black'
+          fen: string
+          move_history: string[]
+          status: 'waiting' | 'active' | 'finished'
+          winner: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id: string
+          player1: string
+          player2?: string | null
+          current_player?: 'white' | 'black'
+          fen?: string
+          move_history?: string[]
+          status?: 'waiting' | 'active' | 'finished'
+          winner?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          player1?: string
+          player2?: string | null
+          current_player?: 'white' | 'black'
+          fen?: string
+          move_history?: string[]
+          status?: 'waiting' | 'active' | 'finished'
+          winner?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

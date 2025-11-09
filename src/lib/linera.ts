@@ -1,13 +1,23 @@
 /**
- * Linera SDK Integration
- * This module provides integration with Linera blockchain for wallet connection
- * and transaction management.
+ * MetaMask SDK Integration
+ * Provides wallet connection and transaction helpers tailored for MetaMask.
  */
+
+import MetaMaskSDK from '@metamask/sdk';
+import type { MetaMaskInpageProvider } from '@metamask/providers';
+
+const CONTRACT_ADDRESS = (import.meta.env.VITE_CHESS_CONTRACT_ADDRESS || '').trim();
+const CONTRACT_CHAIN_ID = (import.meta.env.VITE_CHESS_CONTRACT_CHAIN_ID || '').trim().toLowerCase();
+const CONTRACT_NETWORK_NAME = (import.meta.env.VITE_CHESS_CONTRACT_NETWORK_NAME || '').trim();
+
+export type WalletProviderType = 'metamask';
 
 export interface LineraWallet {
   address: string;
   chainId: string;
   isConnected: boolean;
+  type: WalletProviderType;
+  name: string;
 }
 
 export interface LineraTransaction {
@@ -30,18 +40,43 @@ export interface GameMove {
 class LineraService {
   private wallet: LineraWallet | null = null;
   private listeners: Set<(wallet: LineraWallet | null) => void> = new Set();
+  private metamaskSDK: MetaMaskSDK | null = null;
+  private provider: MetaMaskInpageProvider | null = null;
 
   /**
    * Initialize Linera connection
-   * In a real implementation, this would connect to Linera CLI or wallet extension
+   * Checks for existing wallet connection and sets up event listeners
    */
   async initialize(): Promise<void> {
     try {
-      // Check if wallet is already connected (stored in localStorage)
+      // Initialize MetaMask SDK and provider
+      const provider = this.ensureProvider();
+      if (provider) {
+        this.provider = provider;
+        this.attachProviderListeners(provider);
+      }
+
+      // Fallback: Check if wallet is stored in localStorage
       const stored = localStorage.getItem('linera_wallet');
       if (stored) {
-        this.wallet = JSON.parse(stored);
-        this.notifyListeners();
+        try {
+          const parsedWallet = JSON.parse(stored);
+          const walletType: WalletProviderType = 'metamask';
+          this.wallet = {
+            ...parsedWallet,
+            type: walletType,
+            name: 'MetaMask',
+          };
+          const restoredProvider = this.ensureProvider();
+          if (restoredProvider) {
+            this.provider = restoredProvider;
+            this.attachProviderListeners(restoredProvider);
+          }
+          this.notifyListeners();
+        } catch (error) {
+          // Invalid stored wallet, remove it
+          localStorage.removeItem('linera_wallet');
+        }
       }
     } catch (error) {
       console.error('Failed to initialize Linera:', error);
@@ -50,49 +85,147 @@ class LineraService {
 
   /**
    * Connect to Linera wallet
-   * Simulates connecting to Linera wallet/CLI
+   * Connects to Linera wallet extension or SDK
    */
   async connectWallet(): Promise<LineraWallet> {
-    return new Promise((resolve, reject) => {
-      // Simulate Linera wallet connection
-      // In production, this would interface with Linera CLI or wallet extension
-      try {
-        // Check if Linera CLI is available
-        if (typeof window !== 'undefined' && (window as any).linera) {
-          // Use Linera extension if available
-          (window as any).linera.connect()
-            .then((wallet: any) => {
-              this.wallet = {
-                address: wallet.address,
-                chainId: wallet.chainId || this.generateChainId(),
-                isConnected: true,
-              };
-              this.saveWallet();
-              this.notifyListeners();
-              resolve(this.wallet);
-            })
-            .catch(reject);
-        } else {
-          // Mock connection for development
-          // In production, this would prompt user to install Linera CLI or wallet
-          const mockWallet: LineraWallet = {
-            address: this.generateAddress(),
-            chainId: this.generateChainId(),
-            isConnected: true,
-          };
-          
-          // Simulate async operation
-          setTimeout(() => {
-            this.wallet = mockWallet;
-            this.saveWallet();
-            this.notifyListeners();
-            resolve(this.wallet);
-          }, 500);
-        }
-      } catch (error) {
-        reject(error);
+    if (typeof window === 'undefined') {
+      throw new Error('Window object not available');
+    }
+
+    const provider = this.ensureProvider();
+
+    if (!provider) {
+      throw new Error('MetaMask provider not available. Please install or enable MetaMask.');
+    }
+
+    try {
+      const accounts = await provider.request({ method: 'eth_requestAccounts' });
+      const address = accounts && accounts.length > 0 ? accounts[0] : undefined;
+      const chainId = await this.getEvmChainId(provider);
+      this.ensureCorrectNetwork(chainId);
+      await this.verifyContractDeployment(provider);
+
+      if (!address) {
+        throw new Error('Failed to retrieve wallet address.');
       }
-    });
+
+      this.wallet = {
+        address,
+        chainId: chainId || 'unknown',
+        isConnected: true,
+        type: 'metamask',
+        name: 'MetaMask',
+      };
+
+      this.provider = provider;
+
+      this.attachProviderListeners(provider);
+      this.saveWallet();
+      this.notifyListeners();
+
+      return this.wallet;
+    } catch (error: any) {
+      if (error.code === 4001 || error.code === -32002) {
+        throw new Error('User rejected the connection request');
+      }
+      throw new Error(error.message || 'Failed to connect to MetaMask');
+    }
+  }
+
+  private ensureSDK(): MetaMaskSDK | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    if (!this.metamaskSDK) {
+      this.metamaskSDK = new MetaMaskSDK({
+        dappMetadata: {
+          name: 'LineraChess',
+          url: typeof window !== 'undefined' ? window.location.origin : '',
+        },
+        logging: {
+          developerMode: process.env.NODE_ENV !== 'production',
+        },
+      });
+    }
+
+    return this.metamaskSDK;
+  }
+
+  private ensureProvider(): MetaMaskInpageProvider | null {
+    const sdk = this.ensureSDK();
+    if (!sdk) {
+      return null;
+    }
+
+    if (!this.provider) {
+      const sdkProvider = sdk.getProvider();
+      if (sdkProvider && typeof sdkProvider.request === 'function') {
+        this.provider = sdkProvider as MetaMaskInpageProvider;
+      } else if (sdkProvider?.providers && sdkProvider.providers.length > 0) {
+        const metaMaskProvider = sdkProvider.providers.find((candidate: MetaMaskInpageProvider) => candidate?.isMetaMask);
+        if (metaMaskProvider) {
+          this.provider = metaMaskProvider;
+        }
+      }
+    }
+
+    return this.provider;
+  }
+
+  /**
+   * Get chain ID from wallet or default
+   */
+  private async getEvmChainId(provider: any): Promise<string> {
+    try {
+      if (provider?.request) {
+        const chainId = await provider.request({ method: 'eth_chainId' });
+        if (chainId) {
+          return chainId;
+        }
+      }
+      return '0x1';
+    } catch {
+      return '0x1';
+    }
+  }
+
+  private ensureCorrectNetwork(chainId: string): void {
+    if (!CONTRACT_CHAIN_ID) {
+      return;
+    }
+
+    if (chainId.toLowerCase() !== CONTRACT_CHAIN_ID) {
+      const expectedNetwork = CONTRACT_NETWORK_NAME || CONTRACT_CHAIN_ID;
+      throw new Error(`Please switch MetaMask to the ${expectedNetwork} network before continuing.`);
+    }
+  }
+
+  private async verifyContractDeployment(provider: MetaMaskInpageProvider | null): Promise<void> {
+    if (!provider) {
+      throw new Error('MetaMask provider not available.');
+    }
+
+    if (!CONTRACT_ADDRESS) {
+      console.warn('VITE_CHESS_CONTRACT_ADDRESS not set; running without on-chain contract verification.');
+      return;
+    }
+
+    try {
+      const code = await provider.request({
+        method: 'eth_getCode',
+        params: [CONTRACT_ADDRESS, 'latest'],
+      }) as string;
+
+      if (!code || code === '0x') {
+        throw new Error(`No smart contract detected at ${CONTRACT_ADDRESS}. Please deploy the chess contract first.`);
+      }
+    } catch (error: any) {
+      if (error?.message) {
+        throw error;
+      }
+      throw new Error('Failed to verify chess contract deployment.');
+    }
   }
 
   /**
@@ -100,6 +233,7 @@ class LineraService {
    */
   async disconnectWallet(): Promise<void> {
     this.wallet = null;
+    this.provider = null;
     localStorage.removeItem('linera_wallet');
     this.notifyListeners();
   }
@@ -126,7 +260,17 @@ class LineraService {
       throw new Error('Wallet not connected');
     }
 
-    // In production, this would submit to Linera microchain
+    if (typeof window === 'undefined') {
+      throw new Error('Window object not available');
+    }
+
+    if (!this.provider) {
+      throw new Error('Wallet provider not initialized');
+    }
+
+    await this.verifyContractDeployment(this.provider);
+
+    // For MetaMask, operate in optimistic/off-chain mode
     const transaction: LineraTransaction = {
       id: this.generateTxId(),
       from: this.wallet.address,
@@ -134,18 +278,8 @@ class LineraService {
       data: move,
       timestamp: Date.now(),
     };
-
-    // Simulate blockchain submission
-    console.log('Submitting move to Linera:', transaction);
-    
-    // In production, this would use Linera SDK to submit transaction
-    // await lineraSDK.submitTransaction(transaction);
-    
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve(transaction);
-      }, 300);
-    });
+    console.info('Simulated transaction for MetaMask wallet', transaction);
+    return transaction;
   }
 
   /**
@@ -156,25 +290,20 @@ class LineraService {
       throw new Error('Wallet not connected');
     }
 
-    const gameId = this.generateGameId();
-    
-    // In production, this would create a game contract on Linera
-    const gameData = {
-      gameId,
-      player1: this.wallet.address,
-      player2: opponentAddress || null,
-      status: 'waiting',
-      createdAt: Date.now(),
-    };
+    if (typeof window === 'undefined') {
+      throw new Error('Window object not available');
+    }
 
-    console.log('Creating game on Linera:', gameData);
-    
-    // Simulate game creation
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve(gameId);
-      }, 500);
-    });
+    const provider = this.ensureProvider();
+    if (!provider) {
+      throw new Error('MetaMask provider not available.');
+    }
+
+    await this.verifyContractDeployment(provider);
+
+    const fallbackId = this.generateGameId();
+    console.info('Generated local game ID for MetaMask wallet:', fallbackId);
+    return fallbackId;
   }
 
   /**
@@ -199,15 +328,58 @@ class LineraService {
     }
   }
 
-  private generateAddress(): string {
-    return '0x' + Array.from({ length: 16 }, () => 
-      Math.floor(Math.random() * 16).toString(16)
-    ).join('');
+  private attachProviderListeners(provider: MetaMaskInpageProvider) {
+    if (!provider?.on) {
+      return;
+    }
+
+    provider.removeListener?.('accountsChanged', this.handleAccountsChanged);
+    provider.removeListener?.('disconnect', this.handleDisconnect);
+    provider.removeListener?.('chainChanged', this.handleChainChanged);
+
+    provider.on('accountsChanged', this.handleAccountsChanged);
+    provider.on('disconnect', this.handleDisconnect);
+    provider.on('chainChanged', this.handleChainChanged);
   }
 
-  private generateChainId(): string {
-    return 'chain_' + Math.random().toString(36).substring(2, 9);
-  }
+  private handleAccountsChanged = (accounts: string[]) => {
+    if (!accounts || accounts.length === 0) {
+      this.wallet = null;
+      localStorage.removeItem('linera_wallet');
+      this.notifyListeners();
+      return;
+    }
+
+    if (this.wallet) {
+      this.wallet.address = accounts[0];
+      this.saveWallet();
+      this.notifyListeners();
+    }
+  };
+
+  private handleDisconnect = () => {
+    this.wallet = null;
+    this.provider = null;
+    localStorage.removeItem('linera_wallet');
+    this.notifyListeners();
+  };
+
+  private handleChainChanged = async () => {
+    if (this.wallet && this.provider) {
+      try {
+        const chainId = await this.getEvmChainId(this.provider);
+        this.ensureCorrectNetwork(chainId);
+        await this.verifyContractDeployment(this.provider);
+        this.wallet.chainId = chainId;
+        this.saveWallet();
+        this.notifyListeners();
+      } catch (error) {
+        console.error('Network change error:', error);
+        this.handleDisconnect();
+      }
+    }
+  };
+
 
   private generateTxId(): string {
     return 'tx_' + Date.now().toString(36) + Math.random().toString(36).substring(2);

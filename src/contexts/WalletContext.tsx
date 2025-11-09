@@ -8,6 +8,7 @@ interface WalletContextType {
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   error: string | null;
+  selectedWalletType: 'metamask' | null;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -69,6 +70,7 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         connect,
         disconnect,
         error,
+        selectedWalletType: wallet?.type || null,
       }}
     >
       {children}

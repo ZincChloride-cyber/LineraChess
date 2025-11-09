@@ -8,8 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useGame } from "@/contexts/GameContext";
 import { useWallet } from "@/contexts/WalletContext";
 
-// Type assertion for react-chessboard
-const ChessboardWrapper = Chessboard as any;
+// react-chessboard v4 compatible wrapper
 
 interface ChessBoardProps {
   gameId?: string;
@@ -87,7 +86,7 @@ export const ChessBoard = ({ gameId }: ChessBoardProps) => {
   };
 
   const onDrop = async (sourceSquare: string, targetSquare: string) => {
-    if (isLoading) return false;
+    if (isLoading || !isPlayerTurn) return false;
     
     const result = await makeMove({
       from: sourceSquare,
@@ -137,9 +136,11 @@ export const ChessBoard = ({ gameId }: ChessBoardProps) => {
   };
 
   // Determine if it's current player's turn
+  // If player2 is null, allow the same player to play both sides (for testing/single player mode)
   const isPlayerTurn = currentGame && wallet && (
     (wallet.address === currentGame.player1 && currentGame.currentPlayer === 'white') ||
-    (wallet.address === currentGame.player2 && currentGame.currentPlayer === 'black')
+    (wallet.address === currentGame.player2 && currentGame.currentPlayer === 'black') ||
+    (!currentGame.player2 && wallet.address === currentGame.player1) // Allow single player mode
   );
 
   const playerName = wallet?.address 
@@ -192,11 +193,15 @@ export const ChessBoard = ({ gameId }: ChessBoardProps) => {
                 <Loader2 className="w-8 h-8 animate-spin text-primary" />
               </div>
             )}
-            <ChessboardWrapper
+            <Chessboard
               position={game.fen()}
-              onPieceDrop={onDrop}
+              onPieceDrop={isPlayerTurn ? onDrop : undefined}
               areArrowsAllowed={true}
               boardOrientation={wallet?.address === currentGame?.player2 ? "black" : "white"}
+              customBoardStyle={{
+                borderRadius: '4px',
+                boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+              }}
             />
           </div>
         </Card>

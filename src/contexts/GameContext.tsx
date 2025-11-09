@@ -23,6 +23,29 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const { wallet } = useWallet();
   const { toast } = useToast();
 
+  // Load last game from localStorage on mount
+  useEffect(() => {
+    const loadLastGame = async () => {
+      if (!wallet) return;
+      
+      const lastGameId = localStorage.getItem(`last_game_${wallet.address}`);
+      if (lastGameId) {
+        try {
+          const game = await gameService.getGame(lastGameId);
+          if (game && (game.status === 'waiting' || game.status === 'active')) {
+            setCurrentGame(game);
+          } else {
+            localStorage.removeItem(`last_game_${wallet.address}`);
+          }
+        } catch (err) {
+          console.error('Failed to load last game:', err);
+        }
+      }
+    };
+
+    loadLastGame();
+  }, [wallet]);
+
   const createGame = async (opponentAddress?: string) => {
     if (!wallet) {
       setError('Wallet not connected');
@@ -39,6 +62,10 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setError(null);
       const game = await gameService.createGame({ opponentAddress });
       setCurrentGame(game);
+      // Persist game ID to localStorage
+      if (wallet) {
+        localStorage.setItem(`last_game_${wallet.address}`, game.id);
+      }
       toast({
         title: 'Game Created',
         description: opponentAddress ? 'Game started!' : 'Waiting for opponent...',
@@ -118,10 +145,12 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     // Check if it's the player's turn
     const isWhite = wallet.address === currentGame.player1;
-    const isBlack = wallet.address === currentGame.player2;
+    const isBlack = currentGame.player2 && wallet.address === currentGame.player2;
+    // Allow single player mode: if player2 is null, same player can play both sides
     const isPlayerTurn = 
       (isWhite && currentGame.currentPlayer === 'white') ||
-      (isBlack && currentGame.currentPlayer === 'black');
+      (isBlack && currentGame.currentPlayer === 'black') ||
+      (!currentGame.player2 && isWhite); // Single player mode
 
     if (!isPlayerTurn) {
       toast({
@@ -141,6 +170,10 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         promotion,
       });
       setCurrentGame(updatedGame);
+      // Update persisted game ID
+      if (wallet) {
+        localStorage.setItem(`last_game_${wallet.address}`, updatedGame.id);
+      }
       toast({
         title: 'Move Submitted',
         description: 'Move broadcast to Linera network',
@@ -162,6 +195,10 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const resetGame = () => {
     setCurrentGame(null);
     setError(null);
+    // Clear persisted game
+    if (wallet) {
+      localStorage.removeItem(`last_game_${wallet.address}`);
+    }
   };
 
   return (

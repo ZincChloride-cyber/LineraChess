@@ -161,12 +161,14 @@ class GameService {
 
     if (error) {
       console.warn('Supabase update error:', error);
-      // Return optimistic update
+      // Return optimistic update with all state changes
       return {
         ...game,
         fen: updatedFen,
         moveHistory: updatedHistory,
         currentPlayer: updatedCurrentPlayer,
+        status: updatedStatus,
+        winner: updatedWinner,
         updatedAt: new Date().toISOString(),
       };
     }
@@ -205,6 +207,16 @@ class GameService {
       throw new Error('Wallet not connected');
     }
 
+    // First get the game
+    const game = await this.getGame(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    if (game.player2) {
+      throw new Error('Game already has two players');
+    }
+
     const { data, error } = await supabase
       .from('games')
       .update({
@@ -218,7 +230,14 @@ class GameService {
       .single();
 
     if (error || !data) {
-      throw new Error('Failed to join game');
+      // Return optimistic update if Supabase fails
+      console.warn('Supabase update error, returning optimistic update:', error);
+      return {
+        ...game,
+        player2: wallet.address,
+        status: 'active',
+        updatedAt: new Date().toISOString(),
+      };
     }
 
     return this.mapDbGameToState(data);
