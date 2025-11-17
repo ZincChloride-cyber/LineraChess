@@ -76,6 +76,7 @@ class LineraService {
   private listeners: Set<(wallet: LineraWallet | null) => void> = new Set();
   private metamaskSDK: MetaMaskSDK | null = null;
   private provider: MetaMaskInpageProvider | null = null;
+  private ethersProvider: ethers.BrowserProvider | null = null;
 
   /**
    * Initialize Linera connection
@@ -327,6 +328,74 @@ class LineraService {
   }
 
   /**
+   * Get or create ethers provider with error handling
+   */
+  private async getEthersProvider(): Promise<ethers.BrowserProvider> {
+    if (!this.provider) {
+      throw new Error('MetaMask provider not available');
+    }
+
+    // Reuse cached provider if available
+    if (this.ethersProvider) {
+      return this.ethersProvider;
+    }
+
+    // Create new provider
+    try {
+      this.ethersProvider = new ethers.BrowserProvider(this.provider as any);
+      return this.ethersProvider;
+    } catch (error: any) {
+      console.error('Failed to create ethers provider:', error);
+      throw new Error('Failed to initialize blockchain provider. Please check your network connection.');
+    }
+  }
+
+  /**
+   * Execute a contract call with retry logic
+   */
+  private async executeWithRetry<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 3,
+    delay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        
+        // Don't retry on user rejection
+        if (error.code === 4001 || error.code === -32002 || error.message?.includes('rejected')) {
+          throw error;
+        }
+
+        // Check for RPC errors
+        const isRpcError = error.message?.includes('RPC') || 
+                          error.message?.includes('endpoint') ||
+                          error.message?.includes('network') ||
+                          error.code === 'NETWORK_ERROR' ||
+                          error.code === 'TIMEOUT';
+
+        if (isRpcError && attempt < maxRetries) {
+          const waitTime = delay * Math.pow(2, attempt - 1); // Exponential backoff
+          console.warn(`RPC error on attempt ${attempt}/${maxRetries}. Retrying in ${waitTime}ms...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          
+          // Clear cached provider to force recreation
+          this.ethersProvider = null;
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
    * Get chain ID from wallet or default
    */
   private async getEvmChainId(provider: any): Promise<string> {
@@ -387,6 +456,7 @@ class LineraService {
   async disconnectWallet(): Promise<void> {
     this.wallet = null;
     this.provider = null;
+    this.ethersProvider = null; // Clear cached ethers provider
     localStorage.removeItem('linera_wallet');
     this.notifyListeners();
   }
@@ -428,47 +498,59 @@ class LineraService {
     }
 
     try {
-      // Convert provider to ethers provider
-      const ethersProvider = new ethers.BrowserProvider(this.provider as any);
-      const signer = await ethersProvider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
+      return await this.executeWithRetry(async () => {
+        // Get ethers provider with retry logic
+        const ethersProvider = await this.getEthersProvider();
+        const signer = await ethersProvider.getSigner();
+        const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
 
-      // Convert move notation to contract format
-      // gameId should be bytes32 - if it's already hex, use it; otherwise convert
-      let gameIdBytes: string;
-      if (move.gameId.startsWith('0x') && move.gameId.length === 66) {
-        gameIdBytes = move.gameId;
-      } else {
-        gameIdBytes = ethers.keccak256(ethers.toUtf8Bytes(move.gameId));
-      }
+        // Convert move notation to contract format
+        // gameId should be bytes32 - if it's already hex, use it; otherwise convert
+        let gameIdBytes: string;
+        if (move.gameId.startsWith('0x') && move.gameId.length === 66) {
+          gameIdBytes = move.gameId;
+        } else {
+          gameIdBytes = ethers.keccak256(ethers.toUtf8Bytes(move.gameId));
+        }
 
-      const fromSquare = squareToNumber(move.from);
-      const toSquare = squareToNumber(move.to);
-      const promotion = promotionToNumber(move.promotion);
+        const fromSquare = squareToNumber(move.from);
+        const toSquare = squareToNumber(move.to);
+        const promotion = promotionToNumber(move.promotion);
 
-      // Get new FEN - must be provided by the caller
-      if (!move.newFen) {
-        throw new Error('New FEN must be calculated and provided before submitting move');
-      }
+        // Get new FEN - must be provided by the caller
+        if (!move.newFen) {
+          throw new Error('New FEN must be calculated and provided before submitting move');
+        }
 
-      // Call contract
-      const tx = await contract.submitMove(gameIdBytes, fromSquare, toSquare, promotion, move.newFen);
-      const receipt = await tx.wait();
+        // Call contract
+        const tx = await contract.submitMove(gameIdBytes, fromSquare, toSquare, promotion, move.newFen);
+        const receipt = await tx.wait();
 
-      const transaction: LineraTransaction = {
-        id: receipt.hash,
-        from: this.wallet.address,
-        to: CONTRACT_ADDRESS,
-        data: move,
-        timestamp: Date.now(),
-      };
+        const transaction: LineraTransaction = {
+          id: receipt.hash,
+          from: this.wallet.address,
+          to: CONTRACT_ADDRESS,
+          data: move,
+          timestamp: Date.now(),
+        };
 
-      console.info('Move submitted to blockchain:', transaction);
-      return transaction;
+        console.info('Move submitted to blockchain:', transaction);
+        return transaction;
+      });
     } catch (error: any) {
       if (error.code === 4001 || error.code === -32002) {
         throw new Error('User rejected the transaction');
       }
+      
+      // Provide helpful error messages for RPC issues
+      if (error.message?.includes('RPC') || error.message?.includes('endpoint')) {
+        const chainId = this.wallet?.chainId;
+        if (chainId === '0x539' || chainId === '1337') {
+          throw new Error('Local blockchain node is not responding. Please ensure Hardhat node is running: `npx hardhat node`');
+        }
+        throw new Error('RPC endpoint error. Please check your network connection or try switching networks in MetaMask.');
+      }
+      
       throw new Error(error.message || 'Failed to submit move to blockchain');
     }
   }
@@ -500,50 +582,65 @@ class LineraService {
     }
 
     try {
-      // Convert provider to ethers provider
-      const ethersProvider = new ethers.BrowserProvider(provider as any);
-      const signer = await ethersProvider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
+      return await this.executeWithRetry(async () => {
+        // Get ethers provider with retry logic
+        const ethersProvider = await this.getEthersProvider();
+        const signer = await ethersProvider.getSigner();
+        const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
 
-      // Convert opponent address to proper format (or zero address if not provided)
-      const opponentAddr = opponentAddress && ethers.isAddress(opponentAddress) 
-        ? opponentAddress 
-        : ethers.ZeroAddress;
+        // Convert opponent address to proper format (or zero address if not provided)
+        const opponentAddr = opponentAddress && ethers.isAddress(opponentAddress) 
+          ? opponentAddress 
+          : ethers.ZeroAddress;
 
-      // Call contract to create game
-      const tx = await contract.createGame(opponentAddr);
-      const receipt = await tx.wait();
+        // Call contract to create game
+        const tx = await contract.createGame(opponentAddr);
+        const receipt = await tx.wait();
 
-      // Get gameId from event
-      const gameCreatedEvent = receipt.logs.find((log: any) => {
-        try {
-          const parsed = contract.interface.parseLog(log);
-          return parsed && parsed.name === 'GameCreated';
-        } catch {
-          return false;
+        // Get gameId from event
+        const gameCreatedEvent = receipt.logs.find((log: any) => {
+          try {
+            const parsed = contract.interface.parseLog(log);
+            return parsed && parsed.name === 'GameCreated';
+          } catch {
+            return false;
+          }
+        });
+
+        let gameId: string;
+        if (gameCreatedEvent) {
+          const parsed = contract.interface.parseLog(gameCreatedEvent);
+          gameId = parsed?.args[0] || receipt.hash;
+        } else {
+          // Fallback: use transaction hash as game ID
+          gameId = receipt.hash;
         }
+
+        console.info('Game created on blockchain:', gameId);
+        return gameId;
       });
-
-      let gameId: string;
-      if (gameCreatedEvent) {
-        const parsed = contract.interface.parseLog(gameCreatedEvent);
-        gameId = parsed?.args[0] || receipt.hash;
-      } else {
-        // Fallback: use transaction hash as game ID
-        gameId = receipt.hash;
-      }
-
-      console.info('Game created on blockchain:', gameId);
-      return gameId;
     } catch (error: any) {
       if (error.code === 4001 || error.code === -32002) {
         throw new Error('User rejected the transaction');
       }
+      
+      // Provide helpful error messages for RPC issues
+      if (error.message?.includes('RPC') || error.message?.includes('endpoint')) {
+        const chainId = this.wallet?.chainId;
+        if (chainId === '0x539' || chainId === '1337') {
+          throw new Error('Local blockchain node is not responding. Please ensure Hardhat node is running: `npx hardhat node`');
+        }
+        throw new Error('RPC endpoint error. Please check your network connection or try switching networks in MetaMask.');
+      }
+      
       console.error('Failed to create game on blockchain:', error);
-      // Fallback to local game ID
-      const fallbackId = this.generateGameId();
-      console.warn('Falling back to local game ID:', fallbackId);
-      return fallbackId;
+      // Fallback to local game ID only for non-critical errors
+      if (!error.message?.includes('RPC') && !error.message?.includes('endpoint')) {
+        const fallbackId = this.generateGameId();
+        console.warn('Falling back to local game ID:', fallbackId);
+        return fallbackId;
+      }
+      throw error;
     }
   }
 
@@ -601,6 +698,7 @@ class LineraService {
   private handleDisconnect = () => {
     this.wallet = null;
     this.provider = null;
+    this.ethersProvider = null; // Clear cached ethers provider
     localStorage.removeItem('linera_wallet');
     this.notifyListeners();
   };
@@ -608,6 +706,9 @@ class LineraService {
   private handleChainChanged = async () => {
     if (this.wallet && this.provider) {
       try {
+        // Clear cached provider when chain changes
+        this.ethersProvider = null;
+        
         const chainId = await this.getEvmChainId(this.provider);
         this.ensureCorrectNetwork(chainId);
         await this.verifyContractDeployment(this.provider);
