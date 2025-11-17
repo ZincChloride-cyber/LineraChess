@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
+import { useWallet } from "@/contexts/WalletContext";
 
 interface CreateTrickDialogProps {
   open: boolean;
@@ -25,6 +26,7 @@ export const CreateTrickDialog = ({
   onCreateComplete,
 }: CreateTrickDialogProps) => {
   const [loading, setLoading] = useState(false);
+  const { wallet, isConnected } = useWallet();
   const [formData, setFormData] = useState({
     title: "",
     description: "",
@@ -36,17 +38,26 @@ export const CreateTrickDialog = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!wallet || !isConnected) {
+      toast.error("Please connect your wallet to list a strategy");
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-
-      // Create trick
+      // For creating tricks, we would need database schema to use wallet addresses
+      // For now, show a message that this requires database updates
+      toast.info("Creating strategies requires database integration with wallet addresses. This feature is in development.");
+      
+      // Uncomment below when database is updated to use wallet addresses:
+      /*
+      // Create trick using wallet address as seller
       const { data: trick, error: trickError } = await supabase
         .from("tricks")
         .insert({
-          seller_id: user.id,
+          seller_address: wallet.address, // Assuming column name is seller_address
           title: formData.title,
           description: formData.description,
           category: formData.category,
@@ -79,6 +90,7 @@ export const CreateTrickDialog = ({
       });
       onClose();
       onCreateComplete();
+      */
     } catch (error: any) {
       toast.error(error.message || "Failed to create strategy");
     } finally {

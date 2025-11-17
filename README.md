@@ -91,8 +91,8 @@ Open your browser and navigate to the URL shown in the terminal (usually `http:/
 ## 🎮 How to Play
 
 1. **Connect Your Wallet**
-   - Click "Connect Linera Wallet" in the top right
-   - The app uses a mock wallet in development (for production, connect to a real Linera wallet)
+   - Click "Connect MetaMask" in the top right
+   - Connect your MetaMask wallet to start playing
 
 2. **Start a Game**
    - Navigate to the Game page
@@ -150,9 +150,9 @@ LineraChess/
 ## 🔗 Key Features Explained
 
 ### Wallet Connection
-- Currently uses a mock wallet connection for development
-- In production, integrates with Linera CLI or wallet extension
-- Wallet state is persisted in localStorage
+- Connects to MetaMask wallet extension
+- Users must explicitly connect their wallet - no auto-connection
+- Wallet state is persisted in localStorage only when connected
 
 ### Game Creation
 - Creates a new game on Linera blockchain
@@ -227,7 +227,7 @@ If port 8080 is in use, Vite will automatically try another port. Check the term
 Run `npm install --legacy-peer-deps` if you encounter dependency issues.
 
 ### Wallet Connection Issues
-In development, the wallet is mocked. Make sure your Linera wallet is properly configured for production use.
+Make sure MetaMask is installed and enabled in your browser. The app requires explicit wallet connection - no demo or mock wallets are used.
 
 ### Database Connection Errors
 The app works without Supabase, but game history won't persist. Make sure your environment variables are set correctly.

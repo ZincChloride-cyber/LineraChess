@@ -5,10 +5,43 @@
 
 import MetaMaskSDK from '@metamask/sdk';
 import type { MetaMaskInpageProvider } from '@metamask/providers';
+import { ethers } from 'ethers';
 
 const CONTRACT_ADDRESS = (import.meta.env.VITE_CHESS_CONTRACT_ADDRESS || '').trim();
 const CONTRACT_CHAIN_ID = (import.meta.env.VITE_CHESS_CONTRACT_CHAIN_ID || '').trim().toLowerCase();
 const CONTRACT_NETWORK_NAME = (import.meta.env.VITE_CHESS_CONTRACT_NETWORK_NAME || '').trim();
+
+// Contract ABI (simplified - only functions we need)
+const CHESS_GAME_ABI = [
+  "function createGame(address opponentAddress) external returns (bytes32)",
+  "function joinGame(bytes32 gameId) external",
+  "function submitMove(bytes32 gameId, uint8 fromSquare, uint8 toSquare, uint8 promotion, string calldata newFen) external",
+  "function finishGame(bytes32 gameId, address winner) external",
+  "function resign(bytes32 gameId) external",
+  "function getGame(bytes32 gameId) external view returns (tuple(address player1, address player2, string fen, bool isWhiteTurn, uint8 status, address winner, uint256 createdAt, uint256 lastMoveAt, uint256 moveCount))",
+  "event GameCreated(bytes32 indexed gameId, address indexed player1, address indexed player2)",
+  "event MoveSubmitted(bytes32 indexed gameId, address indexed player, uint8 fromSquare, uint8 toSquare, uint8 promotion)",
+  "event GameFinished(bytes32 indexed gameId, address indexed winner)",
+];
+
+// Helper function to convert square notation (e.g., "e2") to square number (0-63)
+function squareToNumber(square: string): number {
+  const file = square.charCodeAt(0) - 97; // a=0, h=7
+  const rank = parseInt(square.charAt(1)) - 1; // 1=0, 8=7
+  return rank * 8 + file;
+}
+
+// Helper function to convert promotion string to number
+function promotionToNumber(promotion?: string): number {
+  if (!promotion) return 0;
+  switch (promotion.toLowerCase()) {
+    case 'q': return 1; // Queen
+    case 'r': return 2; // Rook
+    case 'b': return 3; // Bishop
+    case 'n': return 4; // Knight
+    default: return 0;
+  }
+}
 
 export type WalletProviderType = 'metamask';
 
@@ -35,6 +68,7 @@ export interface GameMove {
   gameId: string;
   playerAddress: string;
   timestamp: number;
+  newFen?: string; // New FEN after the move (calculated by frontend)
 }
 
 class LineraService {
@@ -45,7 +79,8 @@ class LineraService {
 
   /**
    * Initialize Linera connection
-   * Checks for existing wallet connection and sets up event listeners
+   * Sets up event listeners but does NOT auto-connect wallet
+   * User must explicitly connect via connectWallet() by clicking the connect button
    */
   async initialize(): Promise<void> {
     try {
@@ -55,31 +90,13 @@ class LineraService {
         this.provider = provider;
         this.attachProviderListeners(provider);
       }
-
-      // Fallback: Check if wallet is stored in localStorage
-      const stored = localStorage.getItem('linera_wallet');
-      if (stored) {
-        try {
-          const parsedWallet = JSON.parse(stored);
-          const walletType: WalletProviderType = 'metamask';
-          this.wallet = {
-            ...parsedWallet,
-            type: walletType,
-            name: 'MetaMask',
-          };
-          const restoredProvider = this.ensureProvider();
-          if (restoredProvider) {
-            this.provider = restoredProvider;
-            this.attachProviderListeners(restoredProvider);
-          }
-          this.notifyListeners();
-        } catch (error) {
-          // Invalid stored wallet, remove it
-          localStorage.removeItem('linera_wallet');
-        }
-      }
+      
+      // Clear any stored wallet data - user must explicitly connect each time
+      localStorage.removeItem('linera_wallet');
     } catch (error) {
       console.error('Failed to initialize Linera:', error);
+      // Clear invalid stored wallet on initialization error
+      localStorage.removeItem('linera_wallet');
     }
   }
 
@@ -92,23 +109,88 @@ class LineraService {
       throw new Error('Window object not available');
     }
 
-    const provider = this.ensureProvider();
+    let provider = this.ensureProvider();
+
+    // Verify we got MetaMask, not another wallet
+    if (provider && !(provider as any).isMetaMask) {
+      console.warn('Warning: Provider is not MetaMask. Clearing and retrying...');
+      this.provider = null;
+      provider = this.ensureProvider();
+      if (provider && (provider as any).isMetaMask) {
+        console.log('Successfully found MetaMask on retry');
+      }
+    }
+
+    if (provider) {
+      console.log('Using MetaMask provider:', {
+        isMetaMask: (provider as any).isMetaMask,
+        isExodus: (provider as any).isExodus,
+        hasRequest: typeof (provider as any).request === 'function'
+      });
+    }
 
     if (!provider) {
-      throw new Error('MetaMask provider not available. Please install or enable MetaMask.');
+      // Check if other wallets are installed that might be interfering
+      let errorMessage = 'MetaMask not found. Please install MetaMask extension.';
+      if (typeof window !== 'undefined' && (window as any).ethereum) {
+        const ethereum = (window as any).ethereum;
+        const providers = Array.isArray(ethereum.providers) ? ethereum.providers : 
+                         (ethereum.providers ? [ethereum.providers] : [ethereum]);
+        
+        const installedWallets = providers
+          .map((p: any) => {
+            if (p.isMetaMask) return 'MetaMask';
+            if (p.isExodus) return 'Exodus';
+            if (p.isCoinbaseWallet) return 'Coinbase Wallet';
+            return null;
+          })
+          .filter(Boolean);
+        
+        if (installedWallets.length > 0 && !installedWallets.includes('MetaMask')) {
+          errorMessage = `MetaMask not detected. Found: ${installedWallets.join(', ')}. Please install or enable MetaMask extension.`;
+        }
+      }
+      throw new Error(errorMessage);
     }
 
     try {
+      // Step 1: Request account connection (user approval)
+      console.log('Requesting MetaMask account connection...');
       const accounts = await provider.request({ method: 'eth_requestAccounts' });
       const address = accounts && accounts.length > 0 ? accounts[0] : undefined;
-      const chainId = await this.getEvmChainId(provider);
-      this.ensureCorrectNetwork(chainId);
-      await this.verifyContractDeployment(provider);
 
       if (!address) {
         throw new Error('Failed to retrieve wallet address.');
       }
 
+      console.log('MetaMask account connected:', address);
+
+      // Step 2: Get chain ID (non-blocking, use default if fails)
+      let chainId: string = 'unknown';
+      try {
+        chainId = await this.getEvmChainId(provider) || 'unknown';
+      } catch (error) {
+        console.warn('Failed to get chain ID:', error);
+      }
+
+      // Step 3: Verify network (warn but don't block connection)
+      let networkWarning: string | null = null;
+      try {
+        this.ensureCorrectNetwork(chainId);
+      } catch (error: any) {
+        networkWarning = error.message || 'Network mismatch detected';
+        console.warn('Network verification failed:', networkWarning);
+      }
+
+      // Step 4: Verify contract (warn but don't block connection)
+      try {
+        await this.verifyContractDeployment(provider);
+      } catch (error: any) {
+        console.warn('Contract verification failed:', error.message);
+        // Don't block connection if contract verification fails
+      }
+
+      // Step 5: Create wallet object and save
       this.wallet = {
         address,
         chainId: chainId || 'unknown',
@@ -123,12 +205,32 @@ class LineraService {
       this.saveWallet();
       this.notifyListeners();
 
+      // If there was a network warning, log it but don't throw
+      if (networkWarning) {
+        console.warn('Wallet connected with network warning:', networkWarning);
+      }
+
+      console.log('Wallet successfully connected:', {
+        address: this.wallet.address,
+        chainId: this.wallet.chainId,
+        type: this.wallet.type
+      });
+
       return this.wallet;
     } catch (error: any) {
-      if (error.code === 4001 || error.code === -32002) {
+      console.error('Wallet connection error:', {
+        code: error.code,
+        message: error.message,
+        error: error
+      });
+
+      // Handle user rejection specifically
+      if (error.code === 4001 || error.code === -32002 || error.message?.includes('rejected')) {
         throw new Error('User rejected the connection request');
       }
-      throw new Error(error.message || 'Failed to connect to MetaMask');
+      // Preserve original error message for better debugging
+      const errorMessage = error.message || 'Failed to connect to MetaMask';
+      throw new Error(errorMessage);
     }
   }
 
@@ -153,24 +255,75 @@ class LineraService {
   }
 
   private ensureProvider(): MetaMaskInpageProvider | null {
-    const sdk = this.ensureSDK();
-    if (!sdk) {
-      return null;
+    // First, try to use cached provider (only if it's MetaMask)
+    if (this.provider && (this.provider as any).isMetaMask) {
+      return this.provider;
     }
 
-    if (!this.provider) {
+    // Try to get provider from SDK
+    const sdk = this.ensureSDK();
+    if (sdk) {
       const sdkProvider = sdk.getProvider();
       if (sdkProvider && typeof sdkProvider.request === 'function') {
-        this.provider = sdkProvider as MetaMaskInpageProvider;
+        // Verify it's MetaMask
+        if ((sdkProvider as any).isMetaMask) {
+          this.provider = sdkProvider as MetaMaskInpageProvider;
+          return this.provider;
+        }
       } else if (sdkProvider?.providers && sdkProvider.providers.length > 0) {
-        const metaMaskProvider = sdkProvider.providers.find((candidate: MetaMaskInpageProvider) => candidate?.isMetaMask);
+        // Find MetaMask specifically, ignore other wallets
+        const metaMaskProvider = sdkProvider.providers.find((candidate: any) => 
+          candidate?.isMetaMask && !candidate.isExodus && !candidate.isCoinbaseWallet
+        );
         if (metaMaskProvider) {
-          this.provider = metaMaskProvider;
+          this.provider = metaMaskProvider as MetaMaskInpageProvider;
+          return this.provider;
         }
       }
     }
 
-    return this.provider;
+    // Fallback: Check for window.ethereum directly (common MetaMask injection)
+    if (typeof window !== 'undefined' && (window as any).ethereum) {
+      const ethereum = (window as any).ethereum;
+      
+      // Handle case where ethereum is an array of providers (EIP-6963)
+      if (Array.isArray(ethereum.providers)) {
+        // Find MetaMask specifically, filter out other wallets
+        const metaMaskProvider = ethereum.providers.find((p: any) => 
+          p?.isMetaMask && !p.isExodus && !p.isCoinbaseWallet
+        );
+        if (metaMaskProvider && typeof metaMaskProvider.request === 'function') {
+          this.provider = metaMaskProvider as MetaMaskInpageProvider;
+          return this.provider;
+        }
+      }
+      
+      // Check if ethereum itself is MetaMask
+      if (ethereum.isMetaMask && !ethereum.isExodus && !ethereum.isCoinbaseWallet) {
+        if (typeof ethereum.request === 'function') {
+          this.provider = ethereum as MetaMaskInpageProvider;
+          return this.provider;
+        }
+      }
+    }
+
+    // Additional check: Look for MetaMask specifically by checking for MetaMask-specific properties
+    if (typeof window !== 'undefined') {
+      // Check for MetaMask's specific injection
+      const ethereum = (window as any).ethereum;
+      if (ethereum) {
+        // If it's an array, find MetaMask
+        if (Array.isArray(ethereum)) {
+          const metaMask = ethereum.find((p: any) => p?.isMetaMask);
+          if (metaMask && typeof metaMask.request === 'function') {
+            this.provider = metaMask as MetaMaskInpageProvider;
+            return this.provider;
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -253,7 +406,7 @@ class LineraService {
   }
 
   /**
-   * Submit a chess move to Linera blockchain
+   * Submit a chess move to blockchain
    */
   async submitMove(move: GameMove): Promise<LineraTransaction> {
     if (!this.wallet) {
@@ -270,20 +423,58 @@ class LineraService {
 
     await this.verifyContractDeployment(this.provider);
 
-    // For MetaMask, operate in optimistic/off-chain mode
-    const transaction: LineraTransaction = {
-      id: this.generateTxId(),
-      from: this.wallet.address,
-      to: move.gameId,
-      data: move,
-      timestamp: Date.now(),
-    };
-    console.info('Simulated transaction for MetaMask wallet', transaction);
-    return transaction;
+    if (!CONTRACT_ADDRESS) {
+      throw new Error('Contract address not configured. Please set VITE_CHESS_CONTRACT_ADDRESS in .env');
+    }
+
+    try {
+      // Convert provider to ethers provider
+      const ethersProvider = new ethers.BrowserProvider(this.provider as any);
+      const signer = await ethersProvider.getSigner();
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
+
+      // Convert move notation to contract format
+      // gameId should be bytes32 - if it's already hex, use it; otherwise convert
+      let gameIdBytes: string;
+      if (move.gameId.startsWith('0x') && move.gameId.length === 66) {
+        gameIdBytes = move.gameId;
+      } else {
+        gameIdBytes = ethers.keccak256(ethers.toUtf8Bytes(move.gameId));
+      }
+
+      const fromSquare = squareToNumber(move.from);
+      const toSquare = squareToNumber(move.to);
+      const promotion = promotionToNumber(move.promotion);
+
+      // Get new FEN - must be provided by the caller
+      if (!move.newFen) {
+        throw new Error('New FEN must be calculated and provided before submitting move');
+      }
+
+      // Call contract
+      const tx = await contract.submitMove(gameIdBytes, fromSquare, toSquare, promotion, move.newFen);
+      const receipt = await tx.wait();
+
+      const transaction: LineraTransaction = {
+        id: receipt.hash,
+        from: this.wallet.address,
+        to: CONTRACT_ADDRESS,
+        data: move,
+        timestamp: Date.now(),
+      };
+
+      console.info('Move submitted to blockchain:', transaction);
+      return transaction;
+    } catch (error: any) {
+      if (error.code === 4001 || error.code === -32002) {
+        throw new Error('User rejected the transaction');
+      }
+      throw new Error(error.message || 'Failed to submit move to blockchain');
+    }
   }
 
   /**
-   * Create a new game on Linera blockchain
+   * Create a new game on blockchain
    */
   async createGame(opponentAddress?: string): Promise<string> {
     if (!this.wallet) {
@@ -301,9 +492,59 @@ class LineraService {
 
     await this.verifyContractDeployment(provider);
 
-    const fallbackId = this.generateGameId();
-    console.info('Generated local game ID for MetaMask wallet:', fallbackId);
-    return fallbackId;
+    if (!CONTRACT_ADDRESS) {
+      // Fallback to local game ID if contract not configured
+      const fallbackId = this.generateGameId();
+      console.warn('Contract address not configured. Using local game ID:', fallbackId);
+      return fallbackId;
+    }
+
+    try {
+      // Convert provider to ethers provider
+      const ethersProvider = new ethers.BrowserProvider(provider as any);
+      const signer = await ethersProvider.getSigner();
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CHESS_GAME_ABI, signer);
+
+      // Convert opponent address to proper format (or zero address if not provided)
+      const opponentAddr = opponentAddress && ethers.isAddress(opponentAddress) 
+        ? opponentAddress 
+        : ethers.ZeroAddress;
+
+      // Call contract to create game
+      const tx = await contract.createGame(opponentAddr);
+      const receipt = await tx.wait();
+
+      // Get gameId from event
+      const gameCreatedEvent = receipt.logs.find((log: any) => {
+        try {
+          const parsed = contract.interface.parseLog(log);
+          return parsed && parsed.name === 'GameCreated';
+        } catch {
+          return false;
+        }
+      });
+
+      let gameId: string;
+      if (gameCreatedEvent) {
+        const parsed = contract.interface.parseLog(gameCreatedEvent);
+        gameId = parsed?.args[0] || receipt.hash;
+      } else {
+        // Fallback: use transaction hash as game ID
+        gameId = receipt.hash;
+      }
+
+      console.info('Game created on blockchain:', gameId);
+      return gameId;
+    } catch (error: any) {
+      if (error.code === 4001 || error.code === -32002) {
+        throw new Error('User rejected the transaction');
+      }
+      console.error('Failed to create game on blockchain:', error);
+      // Fallback to local game ID
+      const fallbackId = this.generateGameId();
+      console.warn('Falling back to local game ID:', fallbackId);
+      return fallbackId;
+    }
   }
 
   /**

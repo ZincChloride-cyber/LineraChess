@@ -40,9 +40,16 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       setIsLoading(true);
       setError(null);
       await lineraService.connectWallet();
+      // Clear any previous errors on successful connection
+      setError(null);
     } catch (err: any) {
-      setError(err.message || 'Failed to connect wallet');
+      const errorMessage = err.message || 'Failed to connect wallet';
+      setError(errorMessage);
       console.error('Wallet connection error:', err);
+      // Auto-clear error after 8 seconds
+      setTimeout(() => {
+        setError(null);
+      }, 8000);
     } finally {
       setIsLoading(false);
     }

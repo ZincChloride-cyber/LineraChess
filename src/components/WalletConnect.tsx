@@ -1,8 +1,9 @@
 import { Button } from "@/components/ui/button";
-import { Wallet, Loader2, AlertCircle } from "lucide-react";
+import { Wallet, Loader2, AlertCircle, X } from "lucide-react";
 import { useWallet } from "@/contexts/WalletContext";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { useEffect, useState } from "react";
 
 export const WalletConnect = () => {
   const { 
@@ -13,8 +14,23 @@ export const WalletConnect = () => {
     disconnect, 
     error, 
   } = useWallet();
+  const [showError, setShowError] = useState(false);
+
+  useEffect(() => {
+    if (error) {
+      setShowError(true);
+      // Auto-hide error after 5 seconds
+      const timer = setTimeout(() => {
+        setShowError(false);
+      }, 5000);
+      return () => clearTimeout(timer);
+    } else {
+      setShowError(false);
+    }
+  }, [error]);
 
   const handleConnect = async () => {
+    setShowError(false);
     await connect();
   };
 
@@ -22,12 +38,39 @@ export const WalletConnect = () => {
     await disconnect();
   };
 
+  const getErrorMessage = (error: string) => {
+    if (error.includes("rejected") || error.includes("cancelled")) {
+      return "Connection was cancelled. Please try again and approve the connection in MetaMask.";
+    }
+    if (error.includes("Exodus")) {
+      return "Exodus wallet detected. This app requires MetaMask. Please install MetaMask extension or disable Exodus wallet extension.";
+    }
+    if (error.includes("not available") || error.includes("install") || error.includes("not found") || error.includes("not detected")) {
+      return error; // Use the detailed error message from the service
+    }
+    if (error.includes("network") || error.includes("Network")) {
+      return `Network issue: ${error}. Please check your MetaMask network settings.`;
+    }
+    if (error.includes("contract") || error.includes("Contract")) {
+      return `Contract issue: ${error}. The wallet is connected but contract verification failed.`;
+    }
+    return error;
+  };
+
   return (
     <div className="flex flex-col gap-3">
-      {error && (
-        <Alert variant="destructive" className="mr-2">
+      {error && showError && (
+        <Alert variant="destructive" className="mr-2 relative">
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription className="text-xs">{error}</AlertDescription>
+          <AlertDescription className="text-xs pr-6">
+            {getErrorMessage(error)}
+          </AlertDescription>
+          <button
+            onClick={() => setShowError(false)}
+            className="absolute top-2 right-2 text-destructive hover:text-destructive/80"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </Alert>
       )}
       

@@ -99,25 +99,13 @@ class GameService {
       throw new Error('Wallet not connected');
     }
 
-    // Submit move to Linera blockchain
-    const gameMove: GameMove = {
-      from: move.from,
-      to: move.to,
-      promotion: move.promotion,
-      gameId,
-      playerAddress: wallet.address,
-      timestamp: Date.now(),
-    };
-
-    const transaction = await lineraService.submitMove(gameMove);
-
-    // Update game state in Supabase
+    // Get current game state
     const game = await this.getGame(gameId);
     if (!game) {
       throw new Error('Game not found');
     }
 
-    // Calculate new FEN from move
+    // Calculate new FEN from move (must be done before submitting to blockchain)
     const Chess = (await import('chess.js')).Chess;
     const chessGame = new Chess(game.fen);
     const result = chessGame.move({
@@ -131,6 +119,19 @@ class GameService {
     }
 
     const updatedFen = chessGame.fen();
+
+    // Submit move to blockchain (with calculated FEN)
+    const gameMove: GameMove = {
+      from: move.from,
+      to: move.to,
+      promotion: move.promotion,
+      gameId,
+      playerAddress: wallet.address,
+      timestamp: Date.now(),
+      newFen: updatedFen, // Include calculated FEN
+    };
+
+    const transaction = await lineraService.submitMove(gameMove);
     const updatedHistory = [...game.moveHistory, result.san];
     const updatedCurrentPlayer = game.currentPlayer === 'white' ? 'black' : 'white';
     
